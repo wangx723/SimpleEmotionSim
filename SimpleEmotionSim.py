@@ -20,9 +20,11 @@ class SimpleEmotionSim:
         self.N = 4
         self.alpha = 0.82      # Eligibility trace decay (paper Eq. 2)
         self.beta = 0.18       # Diffusion rate
+        self.beta_eff = 0.18   # Effective diffusion rate
         self.eta = 0.87        # Transfer efficiency (lossy diffusion, paper Eq. 6)
         self.L = 15.0          # Max |valence| per perceptron
         self.gamma = 0.90      # EMA smoothing for anger baseline
+        self.anger = 0.0       # Global anger
 
         # Adjacency matrix for diffusion (home-food, home-intruder, intruder-pain)
         self.adj = np.array([
@@ -56,38 +58,35 @@ class SimpleEmotionSim:
             if active[i]:
                 for j in range(self.N):
                     if self.adj[i, j] and active[j]:
-                        diffusion[i] += self.beta * self.eta * (self.UV[j] - self.UV[i])
+                        diffusion[i] += self.beta_eff * self.eta * (self.UV[j] - self.UV[i])
 
         # 4. Update S-UF valence
-        self.UV += PUV + diffusion
-
-        # 5. Depletion when active without P-UF support
-        depletion_mask = active & (np.abs(puf_valence) < 0.1)
-        self.UV[depletion_mask] *= 0.96
-
-        # 6. Clip valence (paper Eq. 8)
-        self.UV = np.clip(self.UV, -self.L, self.L)
+        self.UV = np.clip(self.UV + PUV + diffusion, -self.L, self.L)
 
         # 7. Simplified anger dynamics (paper Anger section)
         self.EMA = self.gamma * self.EMA + (1 - self.gamma) * self.UV
         current_pos = np.sum(np.maximum(self.UV, 0))
         baseline_pos = np.sum(np.maximum(self.EMA, 0))
         loss = max(baseline_pos - current_pos, 0)
-        anger = max(loss - 3.0, 0)          # activation threshold θ
+        anger_t = max(loss - 1.0, 0)          # activation threshold θ = 1.0
+        self.anger = anger_t + (0.9 * self.anger)
+        # self.anger = 0.0
 
-        # Stronger anger if home (positive) is threatened by intruder/pain
-        if active[1] and active[2] and self.UV[1] > 2 and self.UV[2] < -2:
-            anger = max(anger, 8.0)
+        # Reduced diffusion on anger
+        self.beta_eff = self.beta * (1 - min(self.anger, 10.0)/10.0)
 
-        # Anger protection: limited recovery + reduced diffusion on home
-        if anger > 5 and active[1]:
-            recovery = 0.6 * anger * max(self.EMA[1] - self.UV[1], 0)
-            self.UV[1] += recovery
-            # Reduce further diffusion loss on home
-            diffusion[1] *= 0.35
+        # Anger protection: limited recovery
+        for i in range(self.N):
+            if self.EMA[i] > 1.0:
+                recovery = 1.6 * self.anger * max(self.EMA[i] - self.UV[i], 0)
+                self.UV[i] += recovery
+
+            # Negative valence mapping on non-positive nodes
+            if self.EMA[i] <= 1.0:
+                self.UV[i] += -self.anger * self.e[i]
 
         self.UV = np.clip(self.UV, -self.L, self.L)
-        return anger
+        return self.anger
 
     def simulate(self, total_steps=110):
         """Run a full scenario: safe eating → intruder threat → recovery."""
@@ -141,6 +140,7 @@ class SimpleEmotionSim:
         plt.legend(fontsize=11)
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
+        plt.savefig('simple_emotion_sim_output.png')
         plt.show()
 
 
@@ -150,7 +150,7 @@ if __name__ == "__main__":
     print("Food triggers positive P-UF, pain triggers negative P-UF.\n")
 
     sim = SimpleEmotionSim()
-    sim.simulate(110)
+    sim.simulate(100)
 
     print("\nSimulation complete!")
     print("• Positive valence builds on 'food' and 'home'.")
