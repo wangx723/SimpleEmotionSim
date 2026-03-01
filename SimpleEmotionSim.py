@@ -25,16 +25,23 @@ class SimpleEmotionSim:
         self.L = 15.0          # Max |valence| per perceptron
         self.gamma = 0.90      # EMA smoothing for anger baseline
         self.anger = 0.0       # Global anger
+        self.kappa = 2.6       # Multiplier for max recovery
+        self.sigma = 2.0      # Recovery rate of fallback UV capacity
 
         # Define timing of phases
         self.phases = np.array([25, 50, 75])
 
         # Adjacency matrix for diffusion (home-food, home-intruder, intruder-pain)
         self.adj = np.array([
-            [0, 1, 0, 0],  # food <-> home
-            [1, 0, 1, 0],  # home <-> food, home <-> intruder
-            [0, 1, 0, 1],  # intruder <-> home, intruder <-> pain
-            [0, 0, 1, 0]
+            [1, 1, 1, 1],  # food -> home
+            [1, 1, 1, 1],  # home -> food, home -> intruder
+            [1, 1, 1, 1],  # intruder -> home, intruder -> pain
+            [1, 1, 1, 1]   # pain -> intruder
+
+            # [0, 1, 0, 0],  # food -> home
+            # [1, 0, 1, 0],  # home -> food, home -> intruder
+            # [0, 1, 0, 1],  # intruder -> home, intruder -> pain
+            # [0, 0, 1, 0]   # pain -> intruder
         ])
 
         self.reset()
@@ -44,6 +51,8 @@ class SimpleEmotionSim:
         self.e = np.zeros(self.N)              # Eligibility trace
         self.EMA = np.zeros(self.N)            # Baseline for anger detection
         self.anger_scalar = np.zeros(self.N)   # Local anger
+        self.recovery_capacity = np.zeros(self.N)
+
         self.history_UV = []
         self.history_anger = []
         self.history_phase = []
@@ -73,6 +82,9 @@ class SimpleEmotionSim:
 
         # 5. Simplified anger dynamics (paper Anger section)
         self.EMA = self.gamma * self.EMA + (1 - self.gamma) * self.UV
+        self.recovery_capacity += self.sigma
+        self.recovery_capacity = np.clip(self.recovery_capacity, 0, self.kappa*self.EMA)
+
         current_pos = np.sum(np.maximum(self.UV, 0))
         baseline_pos = np.sum(np.maximum(self.EMA, 0))
         loss = max(baseline_pos - current_pos, 0)
@@ -85,14 +97,19 @@ class SimpleEmotionSim:
 
         # Anger protection: limited recovery
         for i in range(self.N):
-            if self.EMA[i] > 1.0:
-                recovery = 1.6 * self.anger * max(self.EMA[i] - self.UV[i], 0)
+            if self.EMA[i] > 0:
+                # todo: Need to track total recovery per node for limit in recovery
+
+                desired_recovery = 1.6 * self.anger * max(self.EMA[i] - self.UV[i], 0)
+                recovery = min(desired_recovery, self.recovery_capacity[i])
                 self.UV[i] += recovery
+                self.recovery_capacity[i] -= recovery
+                self.recovery_capacity[i] = np.clip(self.recovery_capacity[i], 0, self.kappa*self.EMA[i])
 
             # Local anger & negative valence mapping on non-positive nodes
-            if self.EMA[i] <= 1.0:
-                self.UV[i] += -self.anger * self.e[i]
-                self.anger_scalar[i] += self.anger
+            # if self.EMA[i] <= 0:
+            self.UV[i] += -self.anger * self.e[i]
+            self.anger_scalar[i] += self.anger
         self.anger_scalar = np.clip(self.anger_scalar, -self.L, self.L)
 
         # Local anger diffusion
@@ -102,7 +119,7 @@ class SimpleEmotionSim:
                 for j in range(self.N):
                     if self.adj[i, j] and active[j]:
                         anger_diff[i] += self.beta * self.eta * (self.anger_scalar[j] - self.anger_scalar[i])
-        self.anger_scalar = np.clip(self.anger_scalar + anger_diff, -self.L, self.L)
+        self.anger_scalar = np.clip(self.anger_scalar + anger_diff, 0, self.L)
 
         self.UV = np.clip(self.UV, -self.L, self.L)
         return self.anger, total_anger
@@ -117,7 +134,7 @@ class SimpleEmotionSim:
             active = np.zeros(self.N, dtype=bool)
             puf = np.zeros(self.N)
             puf[0] = 7.5                   # positive P-UF (food)
-            puf[3] = -11.0                 # negative P-UF (pain)
+            puf[3] = -20.0                 # negative P-UF (pain)
             phase = "Unknown"
 
             if t < self.phases[0]:                    # Phase 1: Safe at home, eating food
@@ -140,7 +157,7 @@ class SimpleEmotionSim:
             self.history_local_anger.append(self.anger_scalar.copy())
             self.history_phase.append(phase)
 
-        self.UV_plot()
+        self.UV_plot(True)
         self.anger_plot(True)
 
     def UV_plot(self, show = False):
