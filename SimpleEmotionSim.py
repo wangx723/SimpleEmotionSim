@@ -12,7 +12,7 @@ class SimpleEmotionSim:
     - Key mechanics implemented:
         * P-UF → S-UF mapping with eligibility trace (temporal credit)
         * Lossy valence diffusion between co-active connected concepts
-        * Depletion when active without P-UF reinforcement
+        * Depletion when active without P-UF reinforcement, assuming diffusion possible
         * Simplified anger: protects positive valence of "home" when threatened
     """
 
@@ -26,6 +26,9 @@ class SimpleEmotionSim:
         self.gamma = 0.90      # EMA smoothing for anger baseline
         self.anger = 0.0       # Global anger
 
+        # Define timing of phases
+        self.phases = np.array([25, 50, 75])
+
         # Adjacency matrix for diffusion (home-food, home-intruder, intruder-pain)
         self.adj = np.array([
             [0, 1, 0, 0],  # food <-> home
@@ -37,12 +40,15 @@ class SimpleEmotionSim:
         self.reset()
 
     def reset(self):
-        self.UV = np.zeros(self.N)      # S-UF valence (utility values)
-        self.e = np.zeros(self.N)       # Eligibility trace
-        self.EMA = np.zeros(self.N)     # Baseline for anger detection
+        self.UV = np.zeros(self.N)             # S-UF valence (utility values)
+        self.e = np.zeros(self.N)              # Eligibility trace
+        self.EMA = np.zeros(self.N)            # Baseline for anger detection
+        self.anger_scalar = np.zeros(self.N)   # Local anger
         self.history_UV = []
         self.history_anger = []
         self.history_phase = []
+        self.history_local_anger = []
+        self.history_active_anger = []
 
     def step(self, active, puf_valence):
         """One discrete time step (matches paper formulations)."""
@@ -50,7 +56,9 @@ class SimpleEmotionSim:
         self.e = self.alpha * self.e + (1 - self.alpha) * active.astype(float)
 
         # 2. P-UF → S-UF valence mapping (paper Eq. 3-4, simplified w_j(i)=1)
-        PUV = puf_valence * self.e
+        active_local_anger = np.sum(self.anger_scalar * active)
+        total_anger = self.anger + active_local_anger
+        PUV = puf_valence * self.e * (1 - min(total_anger, 10.0)/10.0)
 
         # 3. Valence diffusion (only among co-active connected concepts)
         diffusion = np.zeros(self.N)
@@ -63,7 +71,7 @@ class SimpleEmotionSim:
         # 4. Update S-UF valence
         self.UV = np.clip(self.UV + PUV + diffusion, -self.L, self.L)
 
-        # 7. Simplified anger dynamics (paper Anger section)
+        # 5. Simplified anger dynamics (paper Anger section)
         self.EMA = self.gamma * self.EMA + (1 - self.gamma) * self.UV
         current_pos = np.sum(np.maximum(self.UV, 0))
         baseline_pos = np.sum(np.maximum(self.EMA, 0))
@@ -73,7 +81,7 @@ class SimpleEmotionSim:
         # self.anger = 0.0
 
         # Reduced diffusion on anger
-        self.beta_eff = self.beta * (1 - min(self.anger, 10.0)/10.0)
+        self.beta_eff = self.beta * (1 - min(total_anger, 10.0)/10.0)
 
         # Anger protection: limited recovery
         for i in range(self.N):
@@ -81,16 +89,29 @@ class SimpleEmotionSim:
                 recovery = 1.6 * self.anger * max(self.EMA[i] - self.UV[i], 0)
                 self.UV[i] += recovery
 
-            # Negative valence mapping on non-positive nodes
+            # Local anger & negative valence mapping on non-positive nodes
             if self.EMA[i] <= 1.0:
                 self.UV[i] += -self.anger * self.e[i]
+                self.anger_scalar[i] += self.anger
+        self.anger_scalar = np.clip(self.anger_scalar, -self.L, self.L)
+
+        # Local anger diffusion
+        anger_diff = np.zeros(self.N)
+        for i in range(self.N):
+            if active[i]:
+                for j in range(self.N):
+                    if self.adj[i, j] and active[j]:
+                        anger_diff[i] += self.beta * self.eta * (self.anger_scalar[j] - self.anger_scalar[i])
+        self.anger_scalar = np.clip(self.anger_scalar + anger_diff, -self.L, self.L)
 
         self.UV = np.clip(self.UV, -self.L, self.L)
-        return self.anger
+        return self.anger, total_anger
 
-    def simulate(self, total_steps=75):
+    def simulate(self, total_steps=-1):
         """Run a full scenario: safe eating → intruder threat → recovery."""
         self.reset()
+        if total_steps < 0:
+            total_steps = self.phases[2]
 
         for t in range(total_steps):
             active = np.zeros(self.N, dtype=bool)
@@ -99,11 +120,11 @@ class SimpleEmotionSim:
             puf[3] = -11.0                 # negative P-UF (pain)
             phase = "Unknown"
 
-            if t < 25:                    # Phase 1: Safe at home, eating food
+            if t < self.phases[0]:                    # Phase 1: Safe at home, eating food
                 active[0] = active[1] = True   # food + home
                 phase = "Safe eating (Food+Home)"
 
-            elif t < 50:                  # Phase 2: Intruder arrives → pain
+            elif t < self.phases[1]:                  # Phase 2: Intruder arrives → pain
                 active[1] = active[2] = active[3] = True  # home + intruder + pain
                 phase = "Intruder attack (Pain)"
 
@@ -111,15 +132,18 @@ class SimpleEmotionSim:
                 active[1] = True               # home only
                 phase = "Recovery (Home safe)"
 
-            anger = self.step(active, puf)
+            global_anger, active_anger = self.step(active, puf)
 
             self.history_UV.append(self.UV.copy())
-            self.history_anger.append(anger)
+            self.history_anger.append(global_anger)
+            self.history_active_anger.append(active_anger)
+            self.history_local_anger.append(self.anger_scalar.copy())
             self.history_phase.append(phase)
 
-        self.plot()
+        self.UV_plot()
+        self.anger_plot(True)
 
-    def plot(self):
+    def UV_plot(self, show = False):
         uv_hist = np.array(self.history_UV)
         labels = ['Food [0] (pos P-UF)', 'Home [1]', 'Intruder [2]', 'Pain [3] (neg P-UF)']
 
@@ -130,9 +154,9 @@ class SimpleEmotionSim:
         plt.plot(self.history_anger, 'r--', linewidth=2, label='Anger level')
 
         # Highlight phases
-        plt.axvspan(0, 25, alpha=0.15, color='green', label='Safe eating [0, 1]')
-        plt.axvspan(25, 50, alpha=0.15, color='orange', label='Intruder attack [1, 2, 3]')
-        plt.axvspan(50, len(uv_hist)-1, alpha=0.15, color='lightblue', label='Intruder neutralized [1]')
+        plt.axvspan(0, self.phases[0], alpha=0.15, color='green', label='Safe eating [0, 1]')
+        plt.axvspan(self.phases[0], self.phases[1], alpha=0.15, color='orange', label='Intruder attack [1, 2, 3]')
+        plt.axvspan(self.phases[1], len(uv_hist)-1, alpha=0.15, color='lightblue', label='Intruder neutralized [1]')
 
         plt.title("Biomimetic Emotion Model Simulation\n4-Concept World: Food / Home / Intruder / Pain", fontsize=16)
         plt.xlabel("Time steps")
@@ -141,7 +165,36 @@ class SimpleEmotionSim:
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
         plt.savefig('simple_emotion_sim_output.png')
-        plt.show()
+
+        if show:
+            plt.show()
+
+    def anger_plot(self, show = False):
+        anger_hist = np.array(self.history_local_anger)
+        labels = ['Food [0] (pos P-UF)', 'Home [1]', 'Intruder [2]', 'Pain [3] (neg P-UF)']
+
+        plt.figure(figsize=(14, 8))
+        for i in range(self.N):
+            plt.plot(anger_hist[:, i], label=labels[i], linewidth=2.5)
+
+        plt.plot(self.history_active_anger, 'r--', linewidth=2, label='Active anger')
+        plt.plot(self.history_anger, 'o--', linewidth=2, label='Global anger')
+
+        # Highlight phases
+        plt.axvspan(0, self.phases[0], alpha=0.15, color='green', label='Safe eating [0, 1]')
+        plt.axvspan(self.phases[0], self.phases[1], alpha=0.15, color='orange', label='Intruder attack [1, 2, 3]')
+        plt.axvspan(self.phases[1], len(anger_hist)-1, alpha=0.15, color='lightblue', label='Intruder neutralized [1]')
+
+        plt.title("Biomimetic Emotion Model Simulation\n4-Concept World: Food / Home / Intruder / Pain", fontsize=16)
+        plt.xlabel("Time steps")
+        plt.ylabel("Local anger scalar")
+        plt.legend(fontsize=11)
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig('simple_emotion_sim_anger_output.png')
+
+        if show:
+            plt.show()
 
 
 # ====================== RUN ======================
@@ -152,7 +205,7 @@ if __name__ == "__main__":
     sim = SimpleEmotionSim()
     sim.simulate()
 
-    print("\nSimulation complete!")
+    print("\nSimulation complete")
     print("• Positive valence builds on 'food' and 'home'.")
     print("• Intruder + pain causes negative transfer and anger.")
     print("• Anger protects 'home' valence (limited recovery + reduced diffusion).")
