@@ -88,23 +88,23 @@ class SimpleEmotionSim:
         self.UV = np.clip(self.UV, -self.L, self.L)
         return self.anger
 
-    def simulate(self, total_steps=110):
+    def simulate(self, total_steps=75):
         """Run a full scenario: safe eating → intruder threat → recovery."""
         self.reset()
 
         for t in range(total_steps):
             active = np.zeros(self.N, dtype=bool)
             puf = np.zeros(self.N)
+            puf[0] = 7.5                   # positive P-UF (food)
+            puf[3] = -11.0                 # negative P-UF (pain)
             phase = "Unknown"
 
             if t < 25:                    # Phase 1: Safe at home, eating food
                 active[0] = active[1] = True   # food + home
-                puf[0] = 7.5                   # positive P-UF (food)
                 phase = "Safe eating (Food+Home)"
 
-            elif t < 55:                  # Phase 2: Intruder arrives → pain
+            elif t < 50:                  # Phase 2: Intruder arrives → pain
                 active[1] = active[2] = active[3] = True  # home + intruder + pain
-                puf[3] = -11.0                 # negative P-UF (pain)
                 phase = "Intruder attack (Pain)"
 
             else:                         # Phase 3: Threat resolved, back to home
@@ -131,8 +131,8 @@ class SimpleEmotionSim:
 
         # Highlight phases
         plt.axvspan(0, 25, alpha=0.15, color='green', label='Safe eating [0, 1]')
-        plt.axvspan(25, 55, alpha=0.15, color='orange', label='Intruder attack [1, 2, 3]')
-        plt.axvspan(55, len(uv_hist)-1, alpha=0.15, color='lightblue', label='Intruder neutralized [1]')
+        plt.axvspan(25, 50, alpha=0.15, color='orange', label='Intruder attack [1, 2, 3]')
+        plt.axvspan(50, len(uv_hist)-1, alpha=0.15, color='lightblue', label='Intruder neutralized [1]')
 
         plt.title("Biomimetic Emotion Model Simulation\n4-Concept World: Food / Home / Intruder / Pain", fontsize=16)
         plt.xlabel("Time steps")
@@ -150,7 +150,7 @@ if __name__ == "__main__":
     print("Food triggers positive P-UF, pain triggers negative P-UF.\n")
 
     sim = SimpleEmotionSim()
-    sim.simulate(100)
+    sim.simulate()
 
     print("\nSimulation complete!")
     print("• Positive valence builds on 'food' and 'home'.")
