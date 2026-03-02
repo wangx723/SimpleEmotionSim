@@ -17,7 +17,7 @@ class SimpleEmotionSim:
     """
 
     def __init__(self):
-        self.N = 4
+        self.N = 4             # Number of nodes
         self.alpha = 0.82      # Eligibility trace decay (paper Eq. 2)
         self.beta = 0.18       # Diffusion rate
         self.beta_eff = 0.18   # Effective diffusion rate
@@ -28,21 +28,37 @@ class SimpleEmotionSim:
         self.kappa = 2.6       # Multiplier for max recovery
         self.sigma = 2.0      # Recovery rate of fallback UV capacity
 
+        # define PUF values
+        self.puf = np.zeros(self.N)
+        self.puf[0] = 7.5  # positive P-UF (food)
+        self.puf[3] = -20.0  # negative P-UF (pain)
+
         # Define timing of phases
-        self.phases = np.array([25, 50, 75])
+        self.phases_t = np.array([25, 50, 75, 100])
+
+        # Define active nodes in each phase
+        self.phases = np.array([
+            # [food, home, intruder, pain]
+            [1, 1, 0, 0],   # food + home
+            [0, 1, 1, 1],   # home + intruder + pain
+            [0, 1, 0, 0],   # home
+            [1, 1, 0, 0]    # food + home
+        ])
+
+        for i in range(self.N):
+            print(self.phases[1, i])
 
         # Adjacency matrix for diffusion (home-food, home-intruder, intruder-pain)
-        self.adj = np.array([
-            [1, 1, 1, 1],  # food -> home
-            [1, 1, 1, 1],  # home -> food, home -> intruder
-            [1, 1, 1, 1],  # intruder -> home, intruder -> pain
-            [1, 1, 1, 1]   # pain -> intruder
+        # Fully connected
+        self.adj = np.array([[1 for i in range(self.N)]
+                             for j in range(self.N)])
 
-            # [0, 1, 0, 0],  # food -> home
-            # [1, 0, 1, 0],  # home -> food, home -> intruder
-            # [0, 1, 0, 1],  # intruder -> home, intruder -> pain
-            # [0, 0, 1, 0]   # pain -> intruder
-        ])
+        # self.adj = np.array([
+        #     [0, 1, 0, 0],  # food -> home
+        #     [1, 0, 1, 0],  # home -> food, home -> intruder
+        #     [0, 1, 0, 1],  # intruder -> home, intruder -> pain
+        #     [0, 0, 1, 0]   # pain -> intruder
+        # ])
 
         self.reset()
 
@@ -55,11 +71,11 @@ class SimpleEmotionSim:
 
         self.history_UV = []
         self.history_anger = []
-        self.history_phase = []
+        # self.history_phase = []
         self.history_local_anger = []
         self.history_active_anger = []
 
-    def step(self, active, puf_valence):
+    def step(self, active):
         """One discrete time step (matches paper formulations)."""
         # 1. Update eligibility trace
         self.e = self.alpha * self.e + (1 - self.alpha) * active.astype(float)
@@ -67,7 +83,7 @@ class SimpleEmotionSim:
         # 2. P-UF → S-UF valence mapping (paper Eq. 3-4, simplified w_j(i)=1)
         active_local_anger = np.sum(self.anger_scalar * active)
         total_anger = self.anger + active_local_anger
-        PUV = puf_valence * self.e * (1 - min(total_anger, 10.0)/10.0)
+        PUV = self.puf * self.e * (1 - min(total_anger, 10.0)/10.0)
 
         # 3. Valence diffusion (only among co-active connected concepts)
         diffusion = np.zeros(self.N)
@@ -90,7 +106,6 @@ class SimpleEmotionSim:
         loss = max(baseline_pos - current_pos, 0)
         anger_t = max(loss - 1.0, 0)          # activation threshold θ = 1.0
         self.anger = anger_t + (0.9 * self.anger)
-        # self.anger = 0.0
 
         # Reduced diffusion on anger
         self.beta_eff = self.beta * (1 - min(total_anger, 10.0)/10.0)
@@ -98,16 +113,13 @@ class SimpleEmotionSim:
         # Anger protection: limited recovery
         for i in range(self.N):
             if self.EMA[i] > 0:
-                # todo: Need to track total recovery per node for limit in recovery
-
                 desired_recovery = 1.6 * self.anger * max(self.EMA[i] - self.UV[i], 0)
                 recovery = min(desired_recovery, self.recovery_capacity[i])
                 self.UV[i] += recovery
                 self.recovery_capacity[i] -= recovery
                 self.recovery_capacity[i] = np.clip(self.recovery_capacity[i], 0, self.kappa*self.EMA[i])
 
-            # Local anger & negative valence mapping on non-positive nodes
-            # if self.EMA[i] <= 0:
+            # Local anger & negative valence mapping
             self.UV[i] += -self.anger * self.e[i]
             self.anger_scalar[i] += self.anger * self.e[i]
         self.anger_scalar = np.clip(self.anger_scalar, -self.L, self.L)
@@ -128,34 +140,25 @@ class SimpleEmotionSim:
         """Run a full scenario: safe eating → intruder threat → recovery."""
         self.reset()
         if total_steps < 0:
-            total_steps = self.phases[2]
+            total_steps = self.phases_t[-1]
 
         for t in range(total_steps):
             active = np.zeros(self.N, dtype=bool)
-            puf = np.zeros(self.N)
-            puf[0] = 7.5                   # positive P-UF (food)
-            puf[3] = -20.0                 # negative P-UF (pain)
-            phase = "Unknown"
 
-            if t < self.phases[0]:                    # Phase 1: Safe at home, eating food
-                active[0] = active[1] = True   # food + home
-                phase = "Safe eating (Food+Home)"
+            for phase in range(len(self.phases_t)):
+                if t < self.phases_t[phase]:
+                    for i in range(self.N):
+                        if self.phases[phase, i] > 0:
+                            active[i] = True
+                    break
 
-            elif t < self.phases[1]:                  # Phase 2: Intruder arrives → pain
-                active[1] = active[2] = active[3] = True  # home + intruder + pain
-                phase = "Intruder attack (Pain)"
-
-            else:                         # Phase 3: Threat resolved, back to home
-                active[1] = True               # home only
-                phase = "Recovery (Home safe)"
-
-            global_anger, active_anger = self.step(active, puf)
+            global_anger, active_anger = self.step(active)
 
             self.history_UV.append(self.UV.copy())
             self.history_anger.append(global_anger)
             self.history_active_anger.append(active_anger)
             self.history_local_anger.append(self.anger_scalar.copy())
-            self.history_phase.append(phase)
+            # self.history_phase.append(phase)
 
         self.UV_plot(True)
         self.anger_plot(True)
@@ -171,9 +174,9 @@ class SimpleEmotionSim:
         plt.plot(self.history_anger, 'r--', linewidth=2, label='Anger level')
 
         # Highlight phases
-        plt.axvspan(0, self.phases[0], alpha=0.15, color='green', label='Safe eating [0, 1]')
-        plt.axvspan(self.phases[0], self.phases[1], alpha=0.15, color='orange', label='Intruder attack [1, 2, 3]')
-        plt.axvspan(self.phases[1], len(uv_hist)-1, alpha=0.15, color='lightblue', label='Intruder neutralized [1]')
+        plt.axvspan(0, self.phases_t[0], alpha=0.15, color='green', label='Safe eating [0, 1]')
+        plt.axvspan(self.phases_t[0], self.phases_t[1], alpha=0.15, color='orange', label='Intruder attack [1, 2, 3]')
+        plt.axvspan(self.phases_t[1], len(uv_hist) - 1, alpha=0.15, color='lightblue', label='Intruder neutralized [1]')
 
         plt.title("Biomimetic Emotion Model Simulation\n4-Concept World: Food / Home / Intruder / Pain", fontsize=16)
         plt.xlabel("Time steps")
@@ -198,9 +201,9 @@ class SimpleEmotionSim:
         plt.plot(self.history_anger, 'o--', linewidth=2, label='Global anger')
 
         # Highlight phases
-        plt.axvspan(0, self.phases[0], alpha=0.15, color='green', label='Safe eating [0, 1]')
-        plt.axvspan(self.phases[0], self.phases[1], alpha=0.15, color='orange', label='Intruder attack [1, 2, 3]')
-        plt.axvspan(self.phases[1], len(anger_hist)-1, alpha=0.15, color='lightblue', label='Intruder neutralized [1]')
+        plt.axvspan(0, self.phases_t[0], alpha=0.15, color='green', label='Safe eating [0, 1]')
+        plt.axvspan(self.phases_t[0], self.phases_t[1], alpha=0.15, color='orange', label='Intruder attack [1, 2, 3]')
+        plt.axvspan(self.phases_t[1], len(anger_hist) - 1, alpha=0.15, color='lightblue', label='Intruder neutralized [1]')
 
         plt.title("Biomimetic Emotion Model Simulation\n4-Concept World: Food / Home / Intruder / Pain", fontsize=16)
         plt.xlabel("Time steps")
