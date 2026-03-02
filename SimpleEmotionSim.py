@@ -109,7 +109,7 @@ class SimpleEmotionSim:
             # Local anger & negative valence mapping on non-positive nodes
             # if self.EMA[i] <= 0:
             self.UV[i] += -self.anger * self.e[i]
-            self.anger_scalar[i] += self.anger
+            self.anger_scalar[i] += self.anger * self.e[i]
         self.anger_scalar = np.clip(self.anger_scalar, -self.L, self.L)
 
         # Local anger diffusion
