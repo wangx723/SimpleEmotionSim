@@ -19,14 +19,16 @@ class SimpleEmotionSim:
     def __init__(self):
         self.N = 4             # Number of nodes
         self.alpha = 0.82      # Eligibility trace decay (paper Eq. 2)
-        self.beta = 0.18       # Diffusion rate
+        self.beta = 0.18       # Base diffusion rate
         self.beta_eff = 0.18   # Effective diffusion rate
-        self.eta = 0.87        # Transfer efficiency (lossy diffusion, paper Eq. 6)
+        self.eta = 0.13        # Transfer loss (lossy diffusion, paper Eq. 6)
         self.L = 15.0          # Max |valence| per perceptron
         self.gamma = 0.90      # EMA smoothing for anger baseline
         self.anger = 0.0       # Global anger
+        self.A_thres = 1.0     # Loss threshold in which global anger activates
+        self.A_max = 10.0      # Anger beyond which diffusion/PUF stop completely
         self.kappa = 2.6       # Multiplier for max recovery
-        self.sigma = 2.0      # Recovery rate of fallback UV capacity
+        self.sigma = 2.0       # Recovery rate of fallback UV capacity
 
         # define PUF values
         self.puf = np.zeros(self.N)
@@ -34,14 +36,13 @@ class SimpleEmotionSim:
         self.puf[3] = -20.0  # negative P-UF (pain)
 
         # Define timing of phases
-        self.phases_t = np.array([25, 50, 75, 100])
+        self.phases_t = np.array([25, 50, 75])
 
         # Define active nodes in each phase
         self.phases = np.array([
             # [food, home, intruder, pain]
             [1, 1, 0, 0],   # food + home
             [0, 1, 1, 1],   # home + intruder + pain
-            [0, 1, 0, 0],   # home
             [1, 1, 0, 0]    # food + home
         ])
 
@@ -88,10 +89,15 @@ class SimpleEmotionSim:
         # 3. Valence diffusion (only among co-active connected concepts)
         diffusion = np.zeros(self.N)
         for i in range(self.N):
+            abs_diff = 0.0
             if active[i]:
                 for j in range(self.N):
                     if self.adj[i, j] and active[j]:
-                        diffusion[i] += self.beta_eff * self.eta * (self.UV[j] - self.UV[i])
+                        delta_i = self.beta_eff * (self.UV[j] - self.UV[i])
+                        diffusion[i] += delta_i
+                        abs_diff += abs(delta_i)
+                # diffusion[i] -= self.eta * self.UV[i]
+                diffusion[i] -= self.eta * abs_diff * np.sign(self.UV[i])
 
         # 4. Update S-UF valence
         self.UV = np.clip(self.UV + PUV + diffusion, -self.L, self.L)
@@ -104,16 +110,16 @@ class SimpleEmotionSim:
         current_pos = np.sum(np.maximum(self.UV, 0))
         baseline_pos = np.sum(np.maximum(self.EMA, 0))
         loss = max(baseline_pos - current_pos, 0)
-        anger_t = max(loss - 1.0, 0)          # activation threshold θ = 1.0
+        anger_t = max(loss - self.A_thres, 0)
         self.anger = anger_t + (0.9 * self.anger)
 
         # Reduced diffusion on anger
-        self.beta_eff = self.beta * (1 - min(total_anger, 10.0)/10.0)
+        self.beta_eff = self.beta * (1 - min(total_anger, self.A_max) / self.A_max)
 
         # Anger protection: limited recovery
         for i in range(self.N):
             if self.EMA[i] > 0:
-                desired_recovery = 1.6 * self.anger * max(self.EMA[i] - self.UV[i], 0)
+                desired_recovery = 2.0 * self.anger * max(self.EMA[i] - self.UV[i], 0)
                 recovery = min(desired_recovery, self.recovery_capacity[i])
                 self.UV[i] += recovery
                 self.recovery_capacity[i] -= recovery
@@ -127,10 +133,15 @@ class SimpleEmotionSim:
         # Local anger diffusion
         anger_diff = np.zeros(self.N)
         for i in range(self.N):
+            abs_diff = 0.0
             if active[i]:
                 for j in range(self.N):
                     if self.adj[i, j] and active[j]:
-                        anger_diff[i] += self.beta * self.eta * (self.anger_scalar[j] - self.anger_scalar[i])
+                        delta_i = self.beta * (self.anger_scalar[j] - self.anger_scalar[i])
+                        anger_diff[i] += delta_i
+                        abs_diff += abs(delta_i)
+            anger_diff[i] -= self.eta * abs_diff
+
         self.anger_scalar = np.clip(self.anger_scalar + anger_diff, 0, self.L)
 
         self.UV = np.clip(self.UV, -self.L, self.L)
@@ -176,7 +187,7 @@ class SimpleEmotionSim:
         # Highlight phases
         plt.axvspan(0, self.phases_t[0], alpha=0.15, color='green', label='Safe eating [0, 1]')
         plt.axvspan(self.phases_t[0], self.phases_t[1], alpha=0.15, color='orange', label='Intruder attack [1, 2, 3]')
-        plt.axvspan(self.phases_t[1], len(uv_hist) - 1, alpha=0.15, color='lightblue', label='Intruder neutralized [1]')
+        plt.axvspan(self.phases_t[1], len(uv_hist) - 1, alpha=0.15, color='lightblue', label='Intruder neutralized [0, 1]')
 
         plt.title("Biomimetic Emotion Model Simulation\n4-Concept World: Food / Home / Intruder / Pain", fontsize=16)
         plt.xlabel("Time steps")
