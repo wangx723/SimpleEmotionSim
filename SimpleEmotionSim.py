@@ -32,7 +32,7 @@ class SimpleEmotionSim:
 
         # define PUF values
         self.puf = np.zeros(self.N)
-        self.puf[0] = 7.5  # positive P-UF (food)
+        self.puf[0] = 7.0  # positive P-UF (food)
         self.puf[3] = -20.0  # negative P-UF (pain)
 
         # Define timing of phases
