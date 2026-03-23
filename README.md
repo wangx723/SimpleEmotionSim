@@ -2,8 +2,6 @@
 
 **Supplementary Code for**  
 **“Functionalist Emotion Modeling in Biomimetic Reinforcement Learning”**  
-Louis Wang  
-(IEEE template submission)
 
 ---
 
